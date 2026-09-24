@@ -6,6 +6,7 @@ export const NOTIFICATION_TYPES = {
    PRICE_MOVED: 'price_moved',
    PAUSE_PROPOSAL_CREATED: 'pause_proposal_created',
    TRADING_PAUSED: 'trading_paused',
+   KEY_DEPRECATED: 'key_deprecated',
 } as const;
 
 export type NotificationType =

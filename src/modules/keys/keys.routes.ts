@@ -26,6 +26,10 @@ import {
    requireJwtAuth,
    AuthenticatedRequest,
 } from '../../middlewares/jwt-auth.middleware';
+import {
+   adminGuard,
+   AdminRequest,
+} from '../../middlewares/admin-guard.middleware';
 import { prisma } from '../../utils/prisma.utils';
 import { logger } from '../../utils/logger.utils';
 import { invalidateCreatorDashboardCache } from '../creator/creator-dashboard.service';
@@ -39,6 +43,23 @@ import {
    DuplicateVoteError,
    OptionIndexOutOfRangeError,
 } from './key-proposal-votes.service';
+import {
+   BuybackPriceNotSetError,
+   BuybackWindowClosedError,
+   deprecateKey,
+   InsufficientPositionError,
+   KeyAlreadyDeprecatedError,
+   KeyNotDeprecatedError,
+   MultisigVerificationError,
+   processBuyback,
+} from './key-deprecation.service';
+import {
+   freezePosition,
+   PositionAlreadyFrozenError,
+   PositionNotFrozenError,
+   PositionNotFoundError,
+   unfreezePosition,
+} from './key-freeze.service';
 
 const priceHistoryQuerySchema = z.object({
    from: z.string().datetime(),
@@ -465,6 +486,242 @@ router.post(
 );
 
 router.all('/:keyId/burn', (_req, res) => {
+   res.set('Allow', 'POST').sendStatus(405);
+});
+
+// ── POST /:keyId/deprecate ───────────────────────────────────
+// Admin endpoint: deprecate a key with a guaranteed holder buyback price.
+// Requires a 2-of-3 admin multisig (Ed25519 signatures over the canonical
+// deprecation message). Notifies all holders via the notification feed.
+
+const buybackPriceSchema = z
+   .union([z.string(), z.number()])
+   .transform(value => String(value))
+   .refine(
+      value => {
+         const parsed = Number(value);
+         return Number.isFinite(parsed) && parsed > 0;
+      },
+      { message: 'buybackPriceXlm must be a positive number' }
+   );
+
+const deprecateBodySchema = z.object({
+   buybackPriceXlm: buybackPriceSchema,
+   buybackExpiresAt: z.string().datetime({
+      message: 'buybackExpiresAt must be an ISO-8601 datetime string',
+   }),
+   signatures: z
+      .array(
+         z.object({
+            wallet: z
+               .string()
+               .regex(/^G[A-Z2-7]{55}$/, 'Invalid Stellar admin wallet'),
+            signature: z.string().min(1, 'signature is required'),
+         })
+      )
+      .min(2, 'Deprecation requires at least 2 admin signatures')
+      .max(3, 'At most 3 admin signatures are accepted'),
+});
+
+/**
+ * POST /api/v1/keys/:keyId/deprecate
+ *
+ * Sets the deprecation flag, guaranteed buyback price, and buyback expiry on
+ * the key record. Requires admin JWT + 2-of-3 multisig signatures. All
+ * current holders are notified through the key_deprecated notification.
+ */
+router.post(
+   '/:keyId/deprecate',
+   adminGuard,
+   async (req: AdminRequest, res, next) => {
+      try {
+         const keyId = String(req.params.keyId);
+         const actor = req.adminId || 'unknown';
+
+         const parsed = deprecateBodySchema.safeParse(req.body);
+         if (!parsed.success) {
+            sendValidationError(
+               res,
+               'Invalid deprecate request body',
+               zodIssuesToDetails(parsed.error.issues)
+            );
+            return;
+         }
+
+         const buybackExpiresAt = new Date(parsed.data.buybackExpiresAt);
+         if (buybackExpiresAt.getTime() <= Date.now()) {
+            sendError(
+               res,
+               400,
+               ErrorCode.BAD_REQUEST,
+               'buybackExpiresAt must be in the future'
+            );
+            return;
+         }
+
+         const result = await deprecateKey({
+            keyId,
+            buybackPriceXlm: parsed.data.buybackPriceXlm,
+            buybackExpiresAt,
+            signatures: parsed.data.signatures,
+            actor,
+         });
+         sendSuccess(res, result, 201);
+      } catch (error) {
+         if (error instanceof KeyNotFoundError) {
+            sendNotFound(res, 'Key');
+            return;
+         }
+         if (error instanceof KeyAlreadyDeprecatedError) {
+            sendConflict(res, error.message);
+            return;
+         }
+         if (error instanceof MultisigVerificationError) {
+            sendForbidden(res, error.message);
+            return;
+         }
+         logger.error({ error, keyId: req.params.keyId }, 'Key deprecate failed');
+         next(error);
+      }
+   }
+);
+
+router.all('/:keyId/deprecate', (_req, res) => {
+   res.set('Allow', 'POST').sendStatus(405);
+});
+
+// ── POST /:keyId/buyback ─────────────────────────────────────
+// Holder exit at the guaranteed buyback price on a deprecated key.
+// Rejected with 410 Gone after the buyback window expires.
+
+/**
+ * POST /api/v1/keys/:keyId/buyback
+ *
+ * Processes the authenticated holder's full-position buyback atomically:
+ * zeroes the balance, decrements circulating supply, and writes the payment
+ * record in a single transaction.
+ */
+router.post(
+   '/:keyId/buyback',
+   requireJwtAuth,
+   async (req: AuthenticatedRequest, res, next) => {
+      try {
+         const keyId = String(req.params.keyId);
+         const wallet = req.user!.wallet;
+         const result = await processBuyback(keyId, wallet);
+         await invalidateCreatorDashboardCache(result.keyId);
+         sendSuccess(res, result, 201);
+      } catch (error) {
+         if (error instanceof KeyNotFoundError) {
+            sendNotFound(res, 'Key');
+            return;
+         }
+         if (error instanceof KeyNotDeprecatedError) {
+            sendConflict(res, error.message);
+            return;
+         }
+         if (error instanceof BuybackWindowClosedError) {
+            sendError(res, 410, ErrorCode.GONE, error.message);
+            return;
+         }
+         if (
+            error instanceof BuybackPriceNotSetError ||
+            error instanceof InsufficientPositionError
+         ) {
+            sendError(res, 400, ErrorCode.BAD_REQUEST, error.message);
+            return;
+         }
+         logger.error({ error, keyId: req.params.keyId }, 'Key buyback failed');
+         next(error);
+      }
+   }
+);
+
+router.all('/:keyId/buyback', (_req, res) => {
+   res.set('Allow', 'POST').sendStatus(405);
+});
+
+// ── POST /:keyId/freeze | /:keyId/unfreeze ───────────────────
+// Self-custody freeze: the holder locks their own position so buys, sells,
+// and transfers of it are rejected with 403 until explicitly unfrozen.
+
+/**
+ * POST /api/v1/keys/:keyId/freeze
+ * Freeze the authenticated wallet's position on a key. Audited.
+ */
+router.post(
+   '/:keyId/freeze',
+   requireJwtAuth,
+   async (req: AuthenticatedRequest, res, next) => {
+      try {
+         const result = await freezePosition(
+            String(req.params.keyId),
+            req.user!.wallet
+         );
+         sendSuccess(res, result, 201);
+      } catch (error) {
+         if (error instanceof KeyNotFoundError) {
+            sendNotFound(res, 'Key');
+            return;
+         }
+         if (error instanceof PositionNotFoundError) {
+            sendNotFound(res, 'Key position');
+            return;
+         }
+         if (error instanceof PositionAlreadyFrozenError) {
+            sendConflict(res, error.message);
+            return;
+         }
+         logger.error(
+            { error, keyId: req.params.keyId },
+            'Key position freeze failed'
+         );
+         next(error);
+      }
+   }
+);
+
+router.all('/:keyId/freeze', (_req, res) => {
+   res.set('Allow', 'POST').sendStatus(405);
+});
+
+/**
+ * POST /api/v1/keys/:keyId/unfreeze
+ * Release the freeze and restore trading/transfer ability. Audited.
+ */
+router.post(
+   '/:keyId/unfreeze',
+   requireJwtAuth,
+   async (req: AuthenticatedRequest, res, next) => {
+      try {
+         const result = await unfreezePosition(
+            String(req.params.keyId),
+            req.user!.wallet
+         );
+         sendSuccess(res, result, 200);
+      } catch (error) {
+         if (error instanceof KeyNotFoundError) {
+            sendNotFound(res, 'Key');
+            return;
+         }
+         if (error instanceof PositionNotFoundError) {
+            sendNotFound(res, 'Key position');
+            return;
+         }
+         if (error instanceof PositionNotFrozenError) {
+            sendConflict(res, error.message);
+            return;
+         }
+         logger.error(
+            { error, keyId: req.params.keyId },
+            'Key position unfreeze failed'
+         );
+         next(error);
+      }
+   }
+);
+
+router.all('/:keyId/unfreeze', (_req, res) => {
    res.set('Allow', 'POST').sendStatus(405);
 });
 
