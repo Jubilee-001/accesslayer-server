@@ -53,8 +53,11 @@ import {
    MultisigVerificationError,
    processBuyback,
 } from './key-deprecation.service';
+import { getKeyCooldown } from './key-cooldown.service';
+import { StellarAddressSchema } from '../wallet/wallet.schemas';
 import {
    freezePosition,
+   getFreezeStatus,
    PositionAlreadyFrozenError,
    PositionNotFrozenError,
    PositionNotFoundError,
@@ -73,6 +76,10 @@ const searchQuerySchema = z.object({
 
 const batchKeysBodySchema = z.object({
    ids: z.array(z.string()).min(1, 'Empty array').max(20, 'More than 20 IDs'),
+});
+
+const walletQuerySchema = z.object({
+   wallet: StellarAddressSchema,
 });
 
 const router = Router();
@@ -319,6 +326,62 @@ router.post(
 router.get('/:keyId/supply', async (req, res, next) => {
    try {
       sendSuccess(res, await getKeySupply(req.params.keyId));
+   } catch (error) {
+      if (error instanceof KeyNotFoundError) {
+         sendNotFound(res, 'Key');
+         return;
+      }
+      next(error);
+   }
+});
+
+/**
+ * GET /api/v1/keys/:keyId/freeze-status?wallet=
+ * Frozen and liquid balance for a holder on a key.
+ */
+router.get('/:keyId/freeze-status', async (req, res, next) => {
+   const parsed = walletQuerySchema.safeParse(req.query);
+   if (!parsed.success) {
+      sendValidationError(
+         res,
+         'Invalid query parameters',
+         zodIssuesToDetails(parsed.error.issues)
+      );
+      return;
+   }
+   try {
+      sendSuccess(
+         res,
+         await getFreezeStatus(String(req.params.keyId), parsed.data.wallet)
+      );
+   } catch (error) {
+      if (error instanceof KeyNotFoundError) {
+         sendNotFound(res, 'Key');
+         return;
+      }
+      next(error);
+   }
+});
+
+/**
+ * GET /api/v1/keys/:keyId/cooldown?wallet=
+ * Remaining buy cooldown for a wallet on a key.
+ */
+router.get('/:keyId/cooldown', async (req, res, next) => {
+   const parsed = walletQuerySchema.safeParse(req.query);
+   if (!parsed.success) {
+      sendValidationError(
+         res,
+         'Invalid query parameters',
+         zodIssuesToDetails(parsed.error.issues)
+      );
+      return;
+   }
+   try {
+      sendSuccess(
+         res,
+         await getKeyCooldown(String(req.params.keyId), parsed.data.wallet)
+      );
    } catch (error) {
       if (error instanceof KeyNotFoundError) {
          sendNotFound(res, 'Key');
