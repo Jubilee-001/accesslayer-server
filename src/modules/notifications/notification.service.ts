@@ -129,14 +129,9 @@ async function buildKeyDeprecated(
       },
    });
 
-   return deprecatedKeys.map(
-      (key: {
-         id: string;
-         deprecatedAt: Date;
-         buybackPriceXlm: unknown;
-         buybackExpiresAt: Date | null;
-      }) => {
-         const createdAt = key.deprecatedAt;
+   return deprecatedKeys.map((key) => {
+         // deprecatedAt is guaranteed non-null by the where: { not: null } filter above
+         const createdAt = key.deprecatedAt!;
          return {
             id: `key_deprecated:${key.id}`,
             type: NOTIFICATION_TYPES.KEY_DEPRECATED,
