@@ -115,4 +115,104 @@ export async function invalidateProtocolStatusCache(): Promise<void> {
    await cacheInvalidate(PROTOCOL_STATUS_CACHE_KEY);
 }
 
+/**
+ * GET /stats
+ *
+ * Returns protocol-wide statistics:
+ * - totalVolume: all time trading volume
+ * - activeKeys: number of active creators (with supply > 0)
+ * - totalHolders: total number of unique wallets holding keys
+ * - trades24h: number of trades in the last 24 hours
+ * - volume24h: trading volume in the last 24 hours
+ * - trades24hChange: percentage change in trades vs previous 24h window
+ * - volume24hChange: percentage change in volume vs previous 24h window
+ *
+ * Cached in Redis for 5 minutes. No authentication required.
+ */
+router.get('/stats', async (_req: Request, res: Response) => {
+   try {
+      const CACHE_KEY = 'protocol:stats';
+      const CACHE_TTL = 300; // 5 minutes
+      
+      const cached = await cacheGetJson(CACHE_KEY);
+      if (cached) {
+         sendSuccess(res, cached);
+         return;
+      }
+
+      const now = new Date();
+      const oneDayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+      const twoDaysAgo = new Date(now.getTime() - 48 * 60 * 60 * 1000);
+
+      // 1. Total Volume
+      const totalVolumeRes = await prisma.$queryRaw<[{ sum: string | null }]>`
+         SELECT SUM(price::numeric) as sum FROM "Trade"
+      `;
+      const totalVolume = totalVolumeRes[0]?.sum || '0';
+
+      // 2. Active Keys (creators with circulating supply > 0)
+      const activeKeys = await prisma.creatorProfile.count({
+         where: { circulatingSupply: { gt: 0 } },
+      });
+
+      // 3. Total Unique Holders (balances > 0)
+      const uniqueHoldersRes = await prisma.$queryRaw<[{ count: bigint }]>`
+         SELECT COUNT(DISTINCT "ownerAddress") as count FROM "KeyOwnership" WHERE balance > 0
+      `;
+      const totalHolders = Number(uniqueHoldersRes[0]?.count || 0);
+
+      // 4. Current 24h Window (trades & volume)
+      const currentWindowRes = await prisma.$queryRaw<[{ count: bigint; sum: string | null }]>`
+         SELECT COUNT(*) as count, SUM(price::numeric) as sum 
+         FROM "Trade" 
+         WHERE "timestamp" >= ${oneDayAgo}
+      `;
+      const trades24h = Number(currentWindowRes[0]?.count || 0);
+      const volume24h = currentWindowRes[0]?.sum || '0';
+
+      // 5. Previous 24h Window (trades & volume)
+      const previousWindowRes = await prisma.$queryRaw<[{ count: bigint; sum: string | null }]>`
+         SELECT COUNT(*) as count, SUM(price::numeric) as sum 
+         FROM "Trade" 
+         WHERE "timestamp" >= ${twoDaysAgo} AND "timestamp" < ${oneDayAgo}
+      `;
+      const prevTrades24h = Number(previousWindowRes[0]?.count || 0);
+      const prevVolume24h = previousWindowRes[0]?.sum || '0';
+
+      // Computations for percentages
+      const calcChange = (current: number, previous: number) => {
+         if (previous === 0) return current > 0 ? 100 : 0;
+         return ((current - previous) / previous) * 100;
+      };
+
+      const trades24hChange = calcChange(trades24h, prevTrades24h);
+      
+      const vCurr = Number(volume24h);
+      const vPrev = Number(prevVolume24h);
+      const volume24hChange = calcChange(vCurr, vPrev);
+
+      const responseData = {
+         totalVolume: String(totalVolume),
+         activeKeys,
+         totalHolders,
+         trades24h,
+         volume24h: String(volume24h),
+         trades24hChange,
+         volume24hChange,
+      };
+
+      await cacheSetJson(CACHE_KEY, responseData, CACHE_TTL);
+
+      sendSuccess(res, responseData);
+   } catch (error) {
+      logger.error({ error }, 'Failed to fetch protocol stats');
+      sendError(
+         res,
+         500,
+         ErrorCode.INTERNAL_ERROR,
+         'Failed to fetch protocol stats'
+      );
+   }
+});
+
 export default router;
