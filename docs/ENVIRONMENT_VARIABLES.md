@@ -5,6 +5,7 @@ Complete reference for all server configuration environment variables.
 ## Categories
 
 - [Application Core](#application-core)
+- [Protocol](#protocol)
 - [Database](#database)
 - [Third-Party Services](#third-party-services)
 - [Stellar Network](#stellar-network)
@@ -26,6 +27,15 @@ Complete reference for all server configuration environment variables.
 | `FRONTEND_URL` | string (URL) | Yes      | -               | Full URL of the frontend application for CORS            |
 | `API_VERSION`  | string       | No       | `1.0.0`         | API version string returned in response headers          |
 | `APP_SECRET`   | string       | No       | _(default key)_ | Secret key for signing operations (min 32 chars)         |
+
+---
+
+## Protocol
+
+| Variable                          | Type   | Required | Default | Description                                                                                       |
+| --------------------------------- | ------ | -------- | ------- | ------------------------------------------------------------------------------------------------- |
+| `REVENUE_DISTRIBUTION_CYCLE_DAYS` | number | No       | `7`     | Length of each protocol revenue distribution cycle in days (#883)                                  |
+| `ADMIN_MULTISIG_WALLETS`          | string | No       | _(unset)_ | Comma-separated Stellar addresses of the 2-of-3 admin quorum for key deprecation (#882). When unset, two distinct valid signatures are still required but no allowlist is enforced (development default). |
 
 ---
 

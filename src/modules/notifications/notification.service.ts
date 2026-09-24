@@ -106,6 +106,58 @@ async function buildLockupExpiring(
    );
 }
 
+async function buildKeyDeprecated(
+   walletAddress: string,
+   lastReadAt: Date | null
+): Promise<NotificationItem[]> {
+   const holdings = await prisma.keyOwnership.findMany({
+      where: { ownerAddress: walletAddress, balance: { gt: 0 } },
+      select: { creatorId: true },
+   });
+   if (holdings.length === 0) {
+      return [];
+   }
+
+   const keyIds = holdings.map((h: { creatorId: string }) => h.creatorId);
+   const deprecatedKeys = await prisma.creatorProfile.findMany({
+      where: { id: { in: keyIds }, deprecatedAt: { not: null } },
+      select: {
+         id: true,
+         deprecatedAt: true,
+         buybackPriceXlm: true,
+         buybackExpiresAt: true,
+      },
+   });
+
+   return deprecatedKeys.map(
+      (key: {
+         id: string;
+         deprecatedAt: Date;
+         buybackPriceXlm: unknown;
+         buybackExpiresAt: Date | null;
+      }) => {
+         const createdAt = key.deprecatedAt;
+         return {
+            id: `key_deprecated:${key.id}`,
+            type: NOTIFICATION_TYPES.KEY_DEPRECATED,
+            createdAt: createdAt.toISOString(),
+            read: isRead(createdAt, lastReadAt),
+            payload: {
+               keyId: key.id,
+               buybackPriceXlm:
+                  key.buybackPriceXlm !== null &&
+                  key.buybackPriceXlm !== undefined
+                     ? String(key.buybackPriceXlm)
+                     : null,
+               buybackExpiresAt: key.buybackExpiresAt
+                  ? key.buybackExpiresAt.toISOString()
+                  : null,
+            },
+         };
+      }
+   );
+}
+
 async function buildPriceMoved(
    walletAddress: string,
    lastReadAt: Date | null,
@@ -168,13 +220,14 @@ export async function listNotifications(
 ): Promise<NotificationItem[]> {
    const lastReadAt = await getLastReadAt(walletAddress);
 
-   const [trades, lockups, priceMoved] = await Promise.all([
+   const [trades, lockups, priceMoved, keyDeprecated] = await Promise.all([
       buildTradeCompleted(walletAddress, lastReadAt),
       buildLockupExpiring(walletAddress, lastReadAt, now),
       buildPriceMoved(walletAddress, lastReadAt, now),
+      buildKeyDeprecated(walletAddress, lastReadAt),
    ]);
 
-   return [...trades, ...lockups, ...priceMoved].sort(
+   return [...trades, ...lockups, ...priceMoved, ...keyDeprecated].sort(
       (a, b) =>
          new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
    );

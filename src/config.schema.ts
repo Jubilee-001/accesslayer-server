@@ -116,6 +116,21 @@ export const envSchema = z
       // Key trade lockup
       LOCKUP_DURATION_SECONDS: z.coerce.number().int().nonnegative().default(0),
 
+      // Protocol revenue distribution (#883): length of each distribution
+      // cycle in days. Trading fees are aggregated into a pool per cycle and
+      // claimed proportionally to stake weight (see src/modules/revenue).
+      REVENUE_DISTRIBUTION_CYCLE_DAYS: z.coerce
+         .number()
+         .int()
+         .positive()
+         .default(7),
+
+      // 2-of-3 admin multisig set for key deprecation (#882). Comma-separated
+      // Stellar addresses of the admin quorum. When unset, deprecation still
+      // requires two distinct valid admin signatures but no allowlist is
+      // enforced (development default).
+      ADMIN_MULTISIG_WALLETS: optionalNonEmptyString,
+
       // Leaderboard volume
       LEADERBOARD_VOLUME_WINDOW_DAYS: z.coerce
          .number()

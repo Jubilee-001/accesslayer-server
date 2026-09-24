@@ -23,6 +23,7 @@ import { requireStellarSignature } from '../../middlewares/stellar-signature.mid
 import { buyKeyRateLimit } from '../../middlewares/wallet-rate-limit.middleware';
 import { validateBody } from '../../middlewares/validate-body.middleware';
 import { httpBuyCreatorKey, buySchema } from '../creator/buy.controller';
+import { httpSellCreatorKey, sellSchema } from '../creator/sell.controller';
 import {
    httpCreatePost,
    httpListPosts,
@@ -51,6 +52,22 @@ creatorsRouter.post(
    buyKeyRateLimit,
    validateBody(buySchema),
    httpBuyCreatorKey
+);
+/**
+ * POST /api/v1/creators/:id/sell
+ *
+ * Sell keys from the authenticated wallet's position. Enforces self-custody
+ * freeze (403 when frozen) and server-side slippage protection: the
+ * submitted min_price is validated against the current bonding-curve price
+ * inside the same transaction as the trade execution (#884, #885).
+ */
+creatorsRouter.post(
+   '/:id/sell',
+   validateCreatorParam('id'),
+   requireStellarSignature(),
+   buyKeyRateLimit,
+   validateBody(sellSchema),
+   httpSellCreatorKey
 );
 creatorsRouter.post('/:id/dividends', requireJwtAuth, httpDistributeDividend);
 creatorsRouter.get('/:id/posts', validateCreatorParam('id'), httpListPosts);
