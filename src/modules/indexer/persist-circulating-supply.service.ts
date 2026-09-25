@@ -1,6 +1,5 @@
 import { prisma } from '../../utils/prisma.utils';
 import { getTierForSupply } from '../keys/key-milestones.service';
-import { Prisma } from '@prisma/client';
 
 const MAX_ATTEMPTS = 3;
 
@@ -12,7 +11,7 @@ export async function persistCirculatingSupply(creatorId: string): Promise<void>
    let lastError: unknown;
    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
       try {
-         await prisma.$transaction(async (transaction: Prisma.TransactionClient) => {
+         await prisma.$transaction(async (transaction) => {
             const activities = await transaction.activity.findMany({
                where: { creatorId, type: { in: ['KEY_BOUGHT', 'KEY_SOLD'] } },
                select: { type: true, payload: true },
@@ -39,7 +38,7 @@ export async function persistCirculatingSupply(creatorId: string): Promise<void>
                const direction = newMilestone > oldMilestone ? 'up' : 'down';
                await transaction.activity.create({
                   data: {
-                     type: 'MILESTONE_CROSSED',
+                     type: 'MILESTONE_CROSSED' as any,
                      actor: 'system',
                      creatorId,
                      payload: {
